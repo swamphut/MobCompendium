@@ -1,6 +1,57 @@
-﻿local _, NS = ...
+local _, NS = ...
 
 NS.DB_VERSION = 2
+
+-- Compendium Tabs
+NS.TAB_OPEN_WORLD = "openworld"
+NS.TAB_INSTANCES = "instances"
+
+-- Midnight (12.0+) Secret Value & Compatibility Helpers
+function NS.IsSecret(val)
+    return issecretvalue ~= nil and issecretvalue(val)
+end
+
+function NS.IsSafe(val)
+    return val ~= nil and not NS.IsSecret(val)
+end
+
+function NS.IsInstanceType(instType)
+    return instType == "party"
+        or instType == "raid"
+        or instType == "scenario"
+        or instType == "pvp"
+        or instType == "arena"
+end
+
+function NS.GetItemInfo(item)
+    if C_Item and C_Item.GetItemInfo then
+        return C_Item.GetItemInfo(item)
+    elseif GetItemInfo then
+        return GetItemInfo(item)
+    end
+end
+
+function NS.GetItemInfoInstant(item)
+    if C_Item and C_Item.GetItemInfoInstant then
+        return C_Item.GetItemInfoInstant(item)
+    elseif GetItemInfoInstant then
+        return GetItemInfoInstant(item)
+    end
+end
+
+function NS.GetItemQualityColor(quality)
+    if C_Item and C_Item.GetItemQualityColor then
+        return C_Item.GetItemQualityColor(quality)
+    elseif GetItemQualityColor then
+        return GetItemQualityColor(quality)
+    end
+    return 1, 1, 1
+end
+
+-- Lore Strings for Redacted Instanced Telemetry
+NS.LORE_REDACTED_TITLE = "[ REDACTED ]"
+NS.LORE_REDACTED_SPELLS = "Arcane interference within instanced sanctums shrouds live spellcraft from field observation.\n\nOnly physical spoils and combat records endure."
+NS.LORE_REDACTED_LOCATION = "Restricted — Instanced Sanctum"
 
 -- Rank Configuration
 NS.RANK_CONFIG = {
@@ -79,6 +130,10 @@ NS.ZONE_ICONS = {
     pvp = {
         icon = "Interface\\Icons\\Faction_Alliance_Vanguard",
         color = { 1, 0, 0 }
+    },
+    arena = {
+        icon = "Interface\\Icons\\Achievement_Arena_2v2_7",
+        color = { 1, 0.3, 0.3 }
     },
     none = {
         icon = "Interface\\Icons\\INV_Misc_Map02",

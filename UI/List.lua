@@ -1,9 +1,9 @@
-﻿local _, NS = ...
+local _, NS = ...
 NS.UI = NS.UI or {}
 NS.UI.List = {}
 
 -- Local References
-local scrollChild, searchBox
+local scrollChild, searchBox, emptyStateText
 local buttons = {}
 
 -- Expansion State
@@ -13,8 +13,9 @@ local expandedSubZones = {}
 -- State Helpers
 local visibleParentKeys = {}   -- List of all current parent keys (for Alt+Click)
 local parentToSubZoneKeys = {} -- Map of ParentKey -> List of SubZoneKeys (for Shift+Click)
-local isInitialized = false
+local initializedTabs = {}
 local selectedNpcID = nil
+local selectedContext = nil
 local searchTimer = nil
 local searchMenu = nil
 
@@ -23,7 +24,7 @@ local function GetSubZoneKey(parent, zone)
     return parent .. "::" .. zone
 end
 
-local function MatchesFilter(mobData, searchText, filters)
+local function MatchesFilter(mobData, searchText, filters, wantInstances)
     -- If search is empty, show everything
     if searchText == "" then
         return true
@@ -43,10 +44,12 @@ local function MatchesFilter(mobData, searchText, filters)
 
     if filters.zones and mobData.encounters then
         for _, enc in pairs(mobData.encounters) do
-            local pMap = strlower(enc.parentMap or "")
-            local zName = strlower(enc.zoneName or "")
-            if string.find(pMap, searchText, 1, true) or string.find(zName, searchText, 1, true) then
-                return true
+            if NS.IsInstanceType(enc.instType) == wantInstances then
+                local pMap = strlower(enc.parentMap or "")
+                local zName = strlower(enc.zoneName or "")
+                if string.find(pMap, searchText, 1, true) or string.find(zName, searchText, 1, true) then
+                    return true
+                end
             end
         end
     end
@@ -64,17 +67,14 @@ local function MatchesFilter(mobData, searchText, filters)
 
     if filters.loot and mobData.encounters then
         for _, enc in pairs(mobData.encounters) do
-            if enc.drops then
+            if NS.IsInstanceType(enc.instType) == wantInstances and enc.drops then
                 for itemID, _ in pairs(enc.drops) do
-
-                    -- Might cause hiccups if searching for items not cached after relog
-                    local itemName = GetItemInfo(itemID)
+                    local itemName = NS.GetItemInfo(itemID)
                     if itemName then
                         if string.find(strlower(itemName), searchText, 1, true) then
                             return true
                         end
                     end
-
                 end
             end
         end
@@ -288,13 +288,41 @@ function NS.UI.List.Init(mainFrame)
     scrollChild = CreateFrame("Frame")
     scrollChild:SetSize(260, 500)
     scrollFrame:SetScrollChild(scrollChild)
+
+    emptyStateText = listBgFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    emptyStateText:SetPoint("TOP", listBgFrame, "TOP", 0, -90)
+    emptyStateText:SetWidth(250)
+    emptyStateText:SetJustifyH("CENTER")
+    emptyStateText:SetTextColor(0.6, 0.6, 0.65)
+    emptyStateText:Hide()
+end
+
+function NS.UI.List.ClearSelection()
+    selectedNpcID = nil
+    selectedContext = nil
+end
+
+function NS.UI.List.RefreshSelected()
+    if not selectedNpcID or not selectedContext then
+        return
+    end
+    if not scrollChild or not scrollChild:IsVisible() then
+        return
+    end
+    if NS.UI.Details and NS.UI.Details.ShowMob then
+        NS.UI.Details.ShowMob(selectedNpcID, selectedContext.groupParent, selectedContext.groupZone, selectedContext.isInstance)
+    end
+    if NS.UI.RightColumn and NS.UI.RightColumn.Update then
+        NS.UI.RightColumn.Update(selectedNpcID, selectedContext.groupParent, selectedContext.groupZone, selectedContext.isInstance)
+    end
 end
 
 function NS.UI.List.Reset()
     expandedParents = {}
     expandedSubZones = {}
     selectedNpcID = nil
-    isInitialized = false
+    selectedContext = nil
+    initializedTabs = {}
     NS.UI.List.Update()
 end
 
@@ -309,6 +337,9 @@ function NS.UI.List.Update()
     local displayList = {}
     local hierarchy = {}
 
+    local activeTab = NS.UI.activeTab or NS.TAB_OPEN_WORLD
+    local wantInstances = (activeTab == NS.TAB_INSTANCES)
+
     local searchText = searchBox and strlower(searchBox:GetText() or "") or ""
     local isSearching = (searchText ~= "")
 
@@ -322,50 +353,53 @@ function NS.UI.List.Update()
     for id, mobData in pairs(MobCompendiumDB) do
         if type(id) == "number" then
 
-            if MatchesFilter(mobData, searchText, filters) then
+            if MatchesFilter(mobData, searchText, filters, wantInstances) then
 
                 if mobData.encounters then
                     for mapID, encounter in pairs(mobData.encounters) do
 
-                        local eRank = encounter.rank or "unknown"
-                        -- Safety check if rank key doesn't exist in our known list
-                        if not NS.RANK_CONFIG[eRank] then
-                            eRank = "unknown"
-                        end
+                        if NS.IsInstanceType(encounter.instType) == wantInstances then
+                            local eRank = encounter.rank or "unknown"
+                            -- Safety check if rank key doesn't exist in our known list
+                            if not NS.RANK_CONFIG[eRank] then
+                                eRank = "unknown"
+                            end
 
-                        local isRankAllowed = true
-                        if rankFilters and not rankFilters[eRank] then
-                            isRankAllowed = false
-                        end
+                            local isRankAllowed = true
+                            if rankFilters and not rankFilters[eRank] then
+                                isRankAllowed = false
+                            end
 
-                        if isRankAllowed then
-                            local pKey = encounter.parentMap or "Uncategorized"
+                            if isRankAllowed then
+                                local pKey = encounter.parentMap or "Uncategorized"
 
-                            if pKey ~= "Uncategorized" then
+                                if pKey ~= "Uncategorized" then
 
-                                local zKey = encounter.zoneName or "Unknown Zone"
+                                    local zKey = encounter.zoneName or "Unknown Zone"
 
-                                if encounter.instType and encounter.instType ~= "none" and encounter.diffName and encounter.diffName ~= "" then
-                                    pKey = pKey .. " [" .. encounter.diffName .. "]"
-                                end
+                                    if encounter.instType and encounter.instType ~= "none" and encounter.diffName and encounter.diffName ~= "" then
+                                        pKey = pKey .. " [" .. encounter.diffName .. "]"
+                                    end
 
-                                if not hierarchy[pKey] then
-                                    hierarchy[pKey] = { zones = {}, type = (encounter.instType or "none") }
-                                end
+                                    if not hierarchy[pKey] then
+                                        hierarchy[pKey] = { zones = {}, type = (encounter.instType or "none") }
+                                    end
 
-                                if not hierarchy[pKey].zones[zKey] then
-                                    hierarchy[pKey].zones[zKey] = { mobs = {}, seen = {} }
-                                end
+                                    if not hierarchy[pKey].zones[zKey] then
+                                        hierarchy[pKey].zones[zKey] = { mobs = {}, seen = {} }
+                                    end
 
-                                if not hierarchy[pKey].zones[zKey].seen[id] then
-                                    table.insert(hierarchy[pKey].zones[zKey].mobs, {
-                                        id = id,
-                                        name = mobData.name,
-                                        rank = encounter.rank or "normal",
-                                        groupParent = pKey,
-                                        groupZone = zKey
-                                    })
-                                    hierarchy[pKey].zones[zKey].seen[id] = true
+                                    if not hierarchy[pKey].zones[zKey].seen[id] then
+                                        table.insert(hierarchy[pKey].zones[zKey].mobs, {
+                                            id = id,
+                                            name = mobData.name,
+                                            rank = encounter.rank or "normal",
+                                            groupParent = pKey,
+                                            groupZone = zKey,
+                                            isInstance = wantInstances
+                                        })
+                                        hierarchy[pKey].zones[zKey].seen[id] = true
+                                    end
                                 end
                             end
                         end
@@ -383,7 +417,7 @@ function NS.UI.List.Update()
 
     visibleParentKeys = sortedParents
 
-    if not isInitialized then
+    if not initializedTabs[activeTab] then
         local currentZoneName = nil
         local mapID = C_Map.GetBestMapForUnit("player")
         if mapID then
@@ -404,7 +438,7 @@ function NS.UI.List.Update()
                 end
             end
         end
-        isInitialized = true
+        initializedTabs[activeTab] = true
     end
 
     for _, pKey in ipairs(sortedParents) do
@@ -455,7 +489,8 @@ function NS.UI.List.Update()
                             id = mob.id,
                             rank = mob.rank,
                             groupParent = mob.groupParent,
-                            groupZone = mob.groupZone
+                            groupZone = mob.groupZone,
+                            isInstance = mob.isInstance
                         })
                     end
                     table.insert(displayList, { type = "SPACER", height = 8 })
@@ -463,6 +498,21 @@ function NS.UI.List.Update()
             end
         end
         table.insert(displayList, { type = "SPACER", height = 4 })
+    end
+
+    if emptyStateText then
+        if #displayList == 0 then
+            if isSearching then
+                emptyStateText:SetText("No matching creatures found.")
+            elseif wantInstances then
+                emptyStateText:SetText("No instanced foes archived yet.\n\nDefeat bosses or loot slain enemies in dungeons, raids, and delves.")
+            else
+                emptyStateText:SetText("No open world creatures recorded yet.\n\nEngage and defeat enemies in the world to begin your field journal.")
+            end
+            emptyStateText:Show()
+        else
+            emptyStateText:Hide()
+        end
     end
 
     local heightAccumulator = 0
@@ -563,13 +613,18 @@ function NS.UI.List.Update()
                 btn:SetScript("OnClick", function()
                     PlaySound(856)
                     selectedNpcID = item.id
+                    selectedContext = {
+                        groupParent = item.groupParent,
+                        groupZone = item.groupZone,
+                        isInstance = item.isInstance
+                    }
                     NS.UI.List.Update()
 
                     if NS.UI.Details and NS.UI.Details.ShowMob then
-                        NS.UI.Details.ShowMob(item.id, item.groupParent, item.groupZone)
+                        NS.UI.Details.ShowMob(item.id, item.groupParent, item.groupZone, item.isInstance)
                     end
                     if NS.UI.RightColumn and NS.UI.RightColumn.Update then
-                        NS.UI.RightColumn.Update(item.id, item.groupParent, item.groupZone)
+                        NS.UI.RightColumn.Update(item.id, item.groupParent, item.groupZone, item.isInstance)
                     end
                 end)
             end

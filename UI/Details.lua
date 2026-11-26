@@ -141,7 +141,7 @@ local function GetEncounterKeys(encounter)
     return pKey, zKey
 end
 
-function NS.UI.Details.ShowMob(npcID, filterParent, filterZone)
+function NS.UI.Details.ShowMob(npcID, filterParent, filterZone, isInstance)
     local data = MobCompendiumDB[npcID]
     if not data then
         return
@@ -158,29 +158,31 @@ function NS.UI.Details.ShowMob(npcID, filterParent, filterZone)
     local latestTimeStr = ""
 
     if data.encounters then
-        for mID, encounter in pairs(data.encounters) do
+        for _, encounter in pairs(data.encounters) do
+            local encIsInstance = NS.IsInstanceType(encounter.instType)
+            if isInstance == nil or encIsInstance == isInstance then
+                totalKills = totalKills + (encounter.kills or 0)
 
-            totalKills = totalKills + (encounter.kills or 0)
+                local pKey, zKey = GetEncounterKeys(encounter)
+                local isMatch = (not filterParent or pKey == filterParent) and
+                        (not filterZone or zKey == filterZone)
 
-            local pKey, zKey = GetEncounterKeys(encounter)
-            local isMatch = (not filterParent or pKey == filterParent) and
-                    (not filterZone or zKey == filterZone)
+                if isMatch then
+                    filteredKills = filteredKills + (encounter.kills or 0)
 
-            if isMatch then
-                filteredKills = filteredKills + (encounter.kills or 0)
+                    -- Capture rank/type from the relevant encounter
+                    if encounter.rank then
+                        displayRank = encounter.rank
+                    end
+                    if encounter.type then
+                        displayType = encounter.type
+                    end
 
-                -- Capture rank/type from the relevant encounter
-                if encounter.rank then
-                    displayRank = encounter.rank
-                end
-                if encounter.type then
-                    displayType = encounter.type
-                end
-
-                -- Check for latest time within this context
-                if encounter.lastTime and encounter.lastTime > latestTimeStr then
-                    latestTimeStr = encounter.lastTime
-                    lastSeenEntry = encounter
+                    -- Check for latest time within this context
+                    if encounter.lastTime and encounter.lastTime >= latestTimeStr then
+                        latestTimeStr = encounter.lastTime
+                        lastSeenEntry = encounter
+                    end
                 end
             end
         end
@@ -203,12 +205,22 @@ function NS.UI.Details.ShowMob(npcID, filterParent, filterZone)
     if lastSeenEntry then
         local timeStr = lastSeenEntry.lastTime or "?"
         if lastSeenEntry.lastX and lastSeenEntry.lastY then
+            lastKillText:SetTextColor(0.6, 0.6, 0.6)
             lastKillText:SetText(string.format("Loc: %.1f, %.1f (%s)", lastSeenEntry.lastX, lastSeenEntry.lastY, timeStr))
             lastKillText:Show()
+        elseif isInstance then
+            lastKillText:SetTextColor(0.76, 0.62, 0.85)
+            lastKillText:SetText(string.format("Loc: [%s] (%s)", NS.LORE_REDACTED_LOCATION, timeStr))
+            lastKillText:Show()
         else
+            lastKillText:SetTextColor(0.6, 0.6, 0.6)
             lastKillText:SetText("Last Kill: " .. timeStr)
             lastKillText:Show()
         end
+    elseif isInstance then
+        lastKillText:SetTextColor(0.76, 0.62, 0.85)
+        lastKillText:SetText("Loc: [" .. NS.LORE_REDACTED_LOCATION .. "]")
+        lastKillText:Show()
     else
         lastKillText:Hide()
     end
@@ -233,7 +245,7 @@ function NS.UI.Details.ShowMob(npcID, filterParent, filterZone)
     modelView.panY = 0
     modelView:SetFacing(0)
     modelView:SetPosition(0, 0, 0)
-    modelView:SetCreature(npcID)
+    pcall(modelView.SetCreature, modelView, npcID)
 end
 
 function NS.UI.Details.Reset()
@@ -244,5 +256,7 @@ function NS.UI.Details.Reset()
     countText:SetText("")
     typeText:SetText("")
     lastKillText:SetText("")
+    rankText:SetText("")
+    rankIcon:Hide()
     modelView:ClearModel()
 end

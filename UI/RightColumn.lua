@@ -1,4 +1,4 @@
-﻿local _, NS = ...
+local _, NS = ...
 NS.UI = NS.UI or {}
 NS.UI.RightColumn = {}
 
@@ -54,13 +54,13 @@ function NS.UI.RightColumn.Reset()
     end
 end
 
-function NS.UI.RightColumn.Update(npcID)
+function NS.UI.RightColumn.Update(npcID, filterParent, filterZone, isInstance)
     local data = MobCompendiumDB[npcID]
 
     if NS.UI.LootList then
-        NS.UI.LootList.Update(data)
+        NS.UI.LootList.Update(data, filterParent, filterZone, isInstance)
     end
     if NS.UI.SpellList then
-        NS.UI.SpellList.Update(data)
+        NS.UI.SpellList.Update(data, isInstance)
     end
 end
