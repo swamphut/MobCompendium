@@ -1,16 +1,18 @@
 local _, NS = ...
 local frame = CreateFrame("Frame")
 
--- In-memory session caches (never persisted until a mob is engaged & defeated/looted)
-local npcMetaCache = {}       -- [npcID] = { name, rank, type, lastSeen }
-local engagedGUIDs = {}       -- [guid]  = { npcID, name, rank, type, time }
-local seenAliveGUIDs = {}     -- [guid]  = true (prevents counting already-dead corpses on hover)
-local killedGUIDs = {}        -- [guid]  = true (deduplicates unit death + loot confirmation)
-local recentBossKills = {}    -- [npcID] = timestamp (deduplicates BOSS_KILL + boss loot)
-local lootCache = {}          -- [guid]  = { [itemID] = true }
-local tempSpellCache = {}     -- [guid]  = { [spellID] = true }
-local combatSessionNpcIDs = {} -- [npcID] = true (distinct enemy types fought during current combat)
-local pendingNpcSpells = {}    -- [npcID] = { spells = { [spellID] = true }, time = GetTime() }
+-- Session-only caches keep the compendium strictly "engage-only": observing a creature via
+-- targeting, mouseover, or nameplates enriches metadata in memory, but nothing is persisted
+-- to MobCompendiumDB until the mob is actively fought and defeated or looted.
+local npcMetaCache = {}        -- [npcID] = { name, rank, type, lastSeen }
+local engagedGUIDs = {}        -- [guid]  = { npcID, name, rank, type, time }
+local seenAliveGUIDs = {}      -- [guid]  = true; stops already-dead world corpses from firing a false kill
+local killedGUIDs = {}         -- [guid]  = true; deduplicates live unit death against subsequent corpse looting
+local recentBossKills = {}     -- [npcID] = timestamp; deduplicates BOSS_KILL against looting the boss corpse
+local lootCache = {}           -- [guid]  = { [itemID] = true }; prevents duplicate loot writes on re-opening a corpse
+local tempSpellCache = {}      -- [guid]  = { [spellID] = true }; buffers non-secret casts until defeat is confirmed
+local combatSessionNpcIDs = {} -- [npcID] = true; tracks distinct enemy types fought in the active combat segment
+local pendingNpcSpells = {}    -- [npcID] = { spells, time }; holds post-combat spells if loot arrives after regen
 local lastProcessedDMSessionID = nil
 
 local inCombat = false
@@ -18,24 +20,26 @@ local lastPlayerActionTime = 0
 local lastTargetGUID = nil
 local debugMode = false
 
--- Spells that appear in DamageTaken but are basic swings or player self-damage mechanics
+-- C_DamageMeter DamageTaken includes melee swings and player self-damage mechanics (such as
+-- Brewmaster Stagger ticks) whose spell IDs do not appear in IsPlayerSpell(). Filtering them
+-- explicitly prevents attributing player class mechanics to whatever mob happened to be fought.
 local IGNORED_DAMAGE_TAKEN_SPELLS = {
     [6603] = true,   -- Auto Attack (Melee)
     [75] = true,     -- Auto Shot
     [5019] = true,   -- Shoot (Wand)
-    [124255] = true, -- Monk: Stagger (self-damage tick)
+    [124255] = true, -- Monk: Stagger tick
     [111400] = true, -- Warlock: Burning Rush
     [1454] = true,   -- Warlock: Life Tap
     [108416] = true, -- Warlock: Dark Pact
-    [32409] = true,  -- Priest: Shadow Word: Death backlash
-    [190714] = true, -- Environmental / Misc self-damage
+    [32409] = true,  -- Priest: Shadow Word: Death recoil
+    [190714] = true, -- Environmental / misc self-damage
     [340928] = true, -- Miscellaneous fall/self tick
 }
 
 local INSPECT_UNITS = { "target", "mouseover", "focus", "softenemy", "boss1", "boss2", "boss3", "boss4", "boss5" }
 
 -- =========================================================================
--- Commands
+-- Slash Commands
 -- =========================================================================
 
 SLASH_MobCompendium1 = "/mobc"
@@ -51,6 +55,7 @@ SlashCmdList["MobCompendiumReset"] = function()
     print("|cff00ffffMobCompendium:|r Database has been reset.")
 end
 
+-- Diagnostic toggles for inspecting Midnight secret-value behavior and C_DamageMeter payloads in-game.
 SLASH_MobCompendiumDebug1 = "/mobcdebug"
 SlashCmdList["MobCompendiumDebug"] = function()
     debugMode = not debugMode
@@ -114,9 +119,10 @@ SlashCmdList["MobCompendiumDM"] = function()
 end
 
 -- =========================================================================
--- Midnight Secret-Safe Helper Functions
+-- Midnight Secret-Safe Helpers
 -- =========================================================================
 
+-- Collapses secret values to nil so callers can branch safely without tripping Lua secret errors.
 local function SafeVal(val)
     if NS.IsSecret(val) then
         return nil
@@ -138,6 +144,8 @@ local function SafeUnitName(unit)
     return SafeVal(UnitName(unit))
 end
 
+-- Only Creature and Vehicle GUIDs represent NPCs with stable numeric npcIDs suitable for the compendium;
+-- players, pets, and game objects are excluded to avoid invalid model IDs or non-mob entries.
 local function SafeParseCreatureGUID(guid)
     if not NS.IsSafe(guid) or type(guid) ~= "string" then
         return nil
@@ -149,6 +157,8 @@ local function SafeParseCreatureGUID(guid)
     return nil
 end
 
+-- Wipes per-zone transient state on loading screens while intentionally keeping npcMetaCache
+-- intact so corpse runs or phasing transitions do not erase recently observed creature names.
 local function ClearCombatCaches()
     engagedGUIDs = {}
     seenAliveGUIDs = {}
@@ -161,6 +171,8 @@ local function ClearCombatCaches()
     lastTargetGUID = nil
 end
 
+-- Scans for the highest sessionID rather than relying on array order, because Blizzard does not
+-- guarantee whether GetAvailableCombatSessions returns segments ascending or descending.
 local function GetLatestDamageMeterSessionID()
     if not C_DamageMeter or not C_DamageMeter.GetAvailableCombatSessions then
         return nil
@@ -190,6 +202,10 @@ local function IsIgnoredPlayerOrBasicSpell(spellID)
     return false
 end
 
+-- Midnight hides live enemy UNIT_SPELLCAST_* spellIDs behind Secret Values even in the open world,
+-- but C_DamageMeter un-secrets DamageTaken spell breakdowns once combat ends. Querying the
+-- finalized Current session after PLAYER_REGEN_ENABLED lets us recover damaging enemy abilities
+-- natively without needing CLEU or external combat log parsers.
 local function HarvestDamageMeterSpells(foughtNpcs)
     if inCombat then
         return
@@ -198,7 +214,8 @@ local function HarvestDamageMeterSpells(foughtNpcs)
         return
     end
 
-    -- Deduplicate so we never re-attribute a previous combat session to a new mob
+    -- Skip if no new meter segment was created (for example, a 1-shot kill where the player took no damage)
+    -- so spells from the previous fight are never misattributed to the newly defeated mob.
     local latestSessionID = GetLatestDamageMeterSessionID()
     if latestSessionID ~= nil then
         if latestSessionID == lastProcessedDMSessionID then
@@ -222,7 +239,6 @@ local function HarvestDamageMeterSpells(foughtNpcs)
         return
     end
 
-    -- Count distinct enemy npcIDs engaged during this combat
     local npcCount = 0
     local singleNpcID = nil
     for npcID, _ in pairs(foughtNpcs) do
@@ -242,7 +258,7 @@ local function HarvestDamageMeterSpells(foughtNpcs)
             if spellInfo and spellInfo.name then
                 local targetNpcID = nil
 
-                -- 1. If Blizzard populated creatureName, match it against the fought enemies
+                -- Prefer explicit creatureName attribution when Blizzard populates it.
                 if NS.IsSafe(sp.creatureName) and sp.creatureName ~= "" then
                     local lowerCreature = strlower(sp.creatureName)
                     for npcID, _ in pairs(foughtNpcs) do
@@ -256,7 +272,8 @@ local function HarvestDamageMeterSpells(foughtNpcs)
                     end
                 end
 
-                -- 2. Otherwise, if only 1 enemy type was fought in this combat, attribute cleanly to it
+                -- When creatureName is blank, only attribute if a single enemy type was fought during
+                -- this segment; mixed pulls are skipped rather than polluting one mob with another's spells.
                 if not targetNpcID and npcCount == 1 then
                     targetNpcID = singleNpcID
                 end
@@ -275,7 +292,8 @@ local function HarvestDamageMeterSpells(foughtNpcs)
                             end
                         end
                     else
-                        -- Mob might be looted a second later; buffer briefly
+                        -- If the mob hasn't been logged yet (e.g. a brand-new mob discovered via looting
+                        -- moments after combat ends), hold the spells briefly so RecordMobKill can absorb them.
                         if not pendingNpcSpells[targetNpcID] then
                             pendingNpcSpells[targetNpcID] = { spells = {}, time = GetTime() }
                         end
@@ -292,7 +310,8 @@ local function HarvestDamageMeterSpells(foughtNpcs)
     end
 end
 
--- Gets the unit rank for a unit (e.g. Critter, Elite, Rare)
+-- Wild battle pets and critters often report "normal" from UnitClassification, so checking
+-- those specialized predicates first keeps them categorized accurately in the rank filter bar.
 local function ResolveRank(unitToken)
     if not NS.IsSafe(unitToken) then
         return "unknown"
@@ -325,6 +344,8 @@ local function ResolveRank(unitToken)
     return "unknown"
 end
 
+-- Walks up the UI map parent chain to find the enclosing continent so micro-zones, caves,
+-- and sub-maps all roll up neatly under a single top-level region in the Open World tab.
 local function GetContinentName(mapID)
     if not mapID then
         return nil
@@ -369,6 +390,9 @@ local function GetLocationData()
     local instName, instanceType, difficultyID, _, _, _, _, instanceID = GetInstanceInfo()
     local isInInstance = NS.IsInstanceType(instanceType)
 
+    -- Instances group under the instance name (with individual floors as sub-zones), while
+    -- open-world areas group under their continent (falling back to immediate parent map for
+    -- special maps like The Wandering Isle that sit outside standard continent hierarchies).
     if isInInstance and instName and instName ~= "" then
         parentMapName = instName
         if zoneName == "Unknown Zone" then
@@ -387,6 +411,8 @@ local function GetLocationData()
         end
     end
 
+    -- Strip "(Surface)" suffixes and reject internal numeric-prefixed placeholder map names
+    -- that occasionally leak from Blizzard's map database.
     if zoneName then
         zoneName = zoneName:gsub("%s*%(Surface%)", "")
         if string.match(zoneName, "^%d") then
@@ -399,6 +425,7 @@ local function GetLocationData()
             parentMapName = nil
         end
     end
+    -- Avoid redundant "Instance -> Instance" nesting when a single-floor instance shares its map name.
     if parentMapName == zoneName then
         zoneName = "General"
     end
@@ -409,33 +436,31 @@ local function GetLocationData()
     local shortDiff = ""
 
     if isInInstance and difficultyID then
-        -- PARTY
+        -- Party difficulties
         if difficultyID == 1 or difficultyID == 205 then
-            shortDiff = "N"       -- Normal / Follower (5 player)
+            shortDiff = "N"       -- Normal / Follower
         elseif difficultyID == 2 then
-            shortDiff = "H"       -- Heroic (5 player)
-        elseif difficultyID == 23 then
-            shortDiff = "M"       -- Mythic (5 player)
-        elseif difficultyID == 8 then
-            shortDiff = "M"       -- Mythic Keystone
+            shortDiff = "H"
+        elseif difficultyID == 23 or difficultyID == 8 then
+            shortDiff = "M"       -- Mythic / Mythic Keystone
         elseif difficultyID == 24 then
-            shortDiff = "TW"      -- Timewalking (5 player)
+            shortDiff = "TW"
 
-        -- RAID
+        -- Raid difficulties
         elseif difficultyID == 14 or difficultyID == 3 or difficultyID == 4 then
-            shortDiff = "N"       -- Normal (Flex / Legacy)
+            shortDiff = "N"
         elseif difficultyID == 15 or difficultyID == 5 or difficultyID == 6 then
-            shortDiff = "H"       -- Heroic (Flex / Legacy)
+            shortDiff = "H"
         elseif difficultyID == 16 then
-            shortDiff = "M"       -- Mythic (20 player)
+            shortDiff = "M"
         elseif difficultyID == 17 or difficultyID == 7 or difficultyID == 151 then
-            shortDiff = "LFR"     -- LFR (Flex / Legacy / Event)
+            shortDiff = "LFR"     -- Includes Timewalking/Event LFR (e.g. Blackrock Depths)
         elseif difficultyID == 33 then
-            shortDiff = "TW"      -- Timewalking Raid
+            shortDiff = "TW"
         elseif difficultyID == 220 then
-            shortDiff = "Story"   -- Story Mode Raid
+            shortDiff = "Story"
 
-        -- DELVES & SCENARIOS
+        -- Delves & Scenarios
         elseif difficultyID == 208 then
             shortDiff = "Delve"
         elseif instanceType == "scenario" then
@@ -443,8 +468,9 @@ local function GetLocationData()
         end
     end
 
+    -- Key instanced encounters by "mapID:difficultyID" so Normal, Heroic, and Mythic kills
+    -- and loot tables stay separated even when the same boss shares an npcID across difficulties.
     local baseID = mapID or instanceID or "Unknown"
-
     local encounterKey = baseID
     if isInInstance and difficultyID then
         encounterKey = baseID .. ":" .. difficultyID
@@ -490,6 +516,8 @@ local function RecordMobKill(npcID, mobName, rank, creatureType, sourceGUID)
 
     local location = GetLocationData()
 
+    -- Blizzard blocks player map coordinates inside instances; skip the query there so
+    -- instanced encounters cleanly display the lore-redacted location notice instead.
     local posX, posY = nil, nil
     if location.mapID and not location.isInInstance then
         local pos = C_Map.GetPlayerMapPosition(location.mapID, "player")
@@ -516,7 +544,7 @@ local function RecordMobKill(npcID, mobName, rank, creatureType, sourceGUID)
     local entry = MobCompendiumDB[npcID]
     FlushSpellsToEntry(entry, sourceGUID)
 
-    -- Flush any spells harvested from C_DamageMeter right before looting this mob
+    -- Absorb any post-combat DamageMeter spells buffered before this loot-confirmed kill arrived.
     local pending = pendingNpcSpells[npcID]
     if pending and (GetTime() - pending.time) < 60 then
         if not entry.spells then
@@ -530,6 +558,7 @@ local function RecordMobKill(npcID, mobName, rank, creatureType, sourceGUID)
 
     combatSessionNpcIDs[npcID] = true
 
+    -- Never overwrite a previously resolved creature name with the loot fallback placeholder.
     if finalName and finalName ~= "Unknown (Looted)" then
         entry.name = finalName
     end
@@ -557,6 +586,7 @@ local function RecordMobKill(npcID, mobName, rank, creatureType, sourceGUID)
     encounter.instType = location.instType
     encounter.diffName = location.shortDiff
 
+    -- Preserve already-known rank/type if a later kill came from loot without live unit metadata.
     if (encounter.rank or "unknown") == "unknown" and finalRank ~= "unknown" then
         encounter.rank = finalRank
     end
@@ -585,7 +615,9 @@ local function RecordMobKill(npcID, mobName, rank, creatureType, sourceGUID)
     return true
 end
 
--- Upgrades an existing "Unknown (Looted)" or incomplete DB entry when the player later hovers/targets the mob or corpse
+-- If an AoE-looted enemy was logged before the player ever targeted or hovered it, later
+-- inspecting its corpse or another instance of the same npcID silently fills in the real
+-- name, rank, and creature type without inflating kill counts.
 local function UpgradeExistingEntryMetadata(npcID, name, rank, creatureType)
     local entry = MobCompendiumDB and MobCompendiumDB[npcID]
     if not entry then
@@ -665,24 +697,24 @@ local function IsUnitTargetingGroup(unit)
     return false
 end
 
+-- Without CLEU damage events, engagement is inferred from threat, enemy targeting, or shared
+-- combat state on the current target. Tap-denied mobs are rejected upfront so bystanders'
+-- kills nearby are never mistakenly attributed to the player.
 local function IsUnitEngagedWithGroup(unit)
     local tapDenied = SafeVal(UnitIsTapDenied(unit))
     if tapDenied == true then
         return false
     end
 
-    -- Player is directly on the mob's threat table
     local threat = SafeVal(UnitThreatSituation("player", unit))
     if threat ~= nil then
         return true
     end
 
-    -- Mob is actively targeting us, our pet, or a party/raid member
     if IsUnitTargetingGroup(unit) then
         return true
     end
 
-    -- Mob is in combat while we are in combat and it is our active target
     local unitInCombat = SafeVal(UnitAffectingCombat(unit))
     if unitInCombat and inCombat and SafeVal(UnitIsUnit(unit, "target")) then
         return true
@@ -704,16 +736,19 @@ local function MarkEngaged(guid, npcID, meta)
     end
 end
 
+-- Confirms a kill when a tracked unit transitions to dead. Beyond normal threat engagement,
+-- a short 4-second player-action window catches instant 1-shots (critters or legacy mobs)
+-- that die before threat or combat flags ever tick.
 local function TryConfirmKillFromUnit(unit, guid, npcID, meta)
     if killedGUIDs[guid] then
         return
     end
 
-    -- Never log kills clearly tapped by someone else
     if SafeVal(UnitIsTapDenied(unit)) == true then
         return
     end
 
+    -- Boss fights in instances can last much longer than open-world skirmishes.
     local inInstance = select(1, IsInInstance())
     local timeout = inInstance and 1800 or 180
     local now = GetTime()
@@ -721,7 +756,6 @@ local function TryConfirmKillFromUnit(unit, guid, npcID, meta)
     local eng = engagedGUIDs[guid]
     local isEngaged = eng and ((now - eng.time) < timeout)
 
-    -- Handle 1-shot kills (e.g. critters or low-level mobs that die before combat/threat ticks)
     local isRecentOneShot = false
     if not isEngaged and seenAliveGUIDs[guid] then
         local recentAction = (now - lastPlayerActionTime) < 4
@@ -752,7 +786,8 @@ local function ObserveUnit(unit)
         return
     end
 
-    -- Ignore friendly NPCs unless we're upgrading an already-recorded entry
+    -- Filter out friendly NPCs while still allowing hostile/neutral corpses whose canAttack flag
+    -- may flip false upon death.
     local canAttack = SafeVal(UnitCanAttack("player", unit))
     local isFriend = SafeVal(UnitIsFriend("player", unit))
     if isFriend == true and canAttack ~= true then
@@ -780,6 +815,8 @@ local function ObserveUnit(unit)
     end
 end
 
+-- Sweeps fixed tokens and visible nameplates at combat boundaries so AoE pulls and mobs that
+-- died off-target are caught even if the player never moused over them mid-fight.
 local function ScanActiveUnits()
     for _, unit in ipairs(INSPECT_UNITS) do
         ObserveUnit(unit)
@@ -793,7 +830,7 @@ local function ScanActiveUnits()
 end
 
 -- =========================================================================
--- DATABASE VERSIONING
+-- Database Versioning
 -- =========================================================================
 
 local function CheckDatabaseVersion()
@@ -810,7 +847,7 @@ local function CheckDatabaseVersion()
 end
 
 -- =========================================================================
--- Event Functions
+-- Event Handlers
 -- =========================================================================
 
 local function OnAddonLoaded()
@@ -826,10 +863,13 @@ end
 local function OnPlayerEnterWorld()
     ClearCombatCaches()
     inCombat = SafeVal(UnitAffectingCombat("player")) == true
+    -- Snapshot the existing meter segment so logging in or zoning never harvests stale combat data.
     lastProcessedDMSessionID = GetLatestDamageMeterSessionID()
 end
 
--- Handles both LOOT_READY (reliable with fast auto-loot) and LOOT_OPENED
+-- Listens to both LOOT_READY and LOOT_OPENED because fast auto-loot addons can close the loot
+-- window before LOOT_OPENED finishes processing. Looting also acts as a fallback kill signal
+-- for off-screen AoE kills or instanced trash whose live combat state was secret.
 local function OnLootAvailable()
     local numItems = GetNumLootItems()
     if not numItems or numItems <= 0 then
@@ -840,6 +880,8 @@ local function OnLootAvailable()
     local foundNewData = false
 
     for i = 1, numItems do
+        -- GetLootSourceInfo returns alternating (sourceGUID, quantity) pairs when stacked items
+        -- are AoE-looted from multiple corpses, so stepping by 2 credits every contributing mob.
         local sources = { GetLootSourceInfo(i) }
         for s = 1, #sources, 2 do
             local sourceGUID = sources[s]
@@ -850,7 +892,6 @@ local function OnLootAvailable()
                     lootCache[sourceGUID] = {}
                 end
 
-                -- Confirm kill if this corpse wasn't already counted by live death detection or BOSS_KILL
                 if not killedGUIDs[sourceGUID] then
                     local recentBossTime = recentBossKills[npcID]
                     local alreadyCountedAsBoss = recentBossTime and (GetTime() - recentBossTime < 60)
@@ -868,7 +909,6 @@ local function OnLootAvailable()
                     end
                 end
 
-                -- Record dropped items
                 if GetLootSlotType(i) == Enum.LootSlotType.Item then
                     local link = GetLootSlotLink(i)
                     if NS.IsSafe(link) then
@@ -879,6 +919,8 @@ local function OnLootAvailable()
                                 if not entry.encounters then
                                     entry.encounters = {}
                                 end
+                                -- Create the encounter bucket if the kill was logged under a different sub-map
+                                -- (for example, stepping across a floor boundary before looting a boss).
                                 if not entry.encounters[location.encounterKey] then
                                     entry.encounters[location.encounterKey] = {
                                         zoneName = location.zoneName,
@@ -905,7 +947,6 @@ local function OnLootAvailable()
     end
 end
 
--- Records enemy spell casts when Midnight exposes non-secret unit & spell data
 local function DescribeVal(val)
     if NS.IsSecret(val) then
         return "SECRET"
@@ -916,6 +957,9 @@ local function DescribeVal(val)
     return tostring(val)
 end
 
+-- Kept alongside C_DamageMeter harvesting for two reasons: player/pet casts drive the 1-shot
+-- kill detection window, and any future non-secret or whitelisted enemy casts (including
+-- non-damaging buffs/heals) will be captured automatically if Blizzard relaxes secret flags.
 local function OnUnitSpellCast(event, unitTarget, _, spellID)
     if not NS.IsSafe(unitTarget) then
         if debugMode then
@@ -924,14 +968,12 @@ local function OnUnitSpellCast(event, unitTarget, _, spellID)
         return
     end
 
-    -- Track player/pet offensive actions to catch 1-shot kills
     if unitTarget == "player" or unitTarget == "pet" then
         lastPlayerActionTime = GetTime()
         ObserveUnit("target")
         return
     end
 
-    -- Fallback to UnitCastingInfo / UnitChannelInfo if event spellID is nil
     local castName, castSpellID
     if event == "UNIT_SPELLCAST_CHANNEL_START" then
         local name, _, _, _, _, _, _, sID = UnitChannelInfo(unitTarget)
@@ -1005,7 +1047,7 @@ local function OnUnitSpellCast(event, unitTarget, _, spellID)
         end
     end
 
-    -- Buffer until engagement + defeat is confirmed
+    -- Buffer rather than writing immediately so spells from ambient non-engaged mobs are never saved.
     if not tempSpellCache[guid] then
         tempSpellCache[guid] = {}
     end
@@ -1015,7 +1057,8 @@ local function OnUnitSpellCast(event, unitTarget, _, spellID)
     end
 end
 
--- Records Dungeon / Raid boss kills reliably even when combat telemetry is redacted
+-- BOSS_KILL provides an encounter name rather than an npcID; matching it against engaged or
+-- pre-pull observed units resolves the real creature ID needed by the 3D model viewer.
 local function TryRecordBossByName(encounterName)
     if not NS.IsSafe(encounterName) or encounterName == "" then
         return false
@@ -1023,7 +1066,6 @@ local function TryRecordBossByName(encounterName)
 
     local lowerEnc = strlower(encounterName)
 
-    -- 1. Check engaged GUIDs first
     for guid, eng in pairs(engagedGUIDs) do
         if eng.name and strlower(eng.name) == lowerEnc and not killedGUIDs[guid] then
             recentBossKills[eng.npcID] = GetTime()
@@ -1032,7 +1074,8 @@ local function TryRecordBossByName(encounterName)
         end
     end
 
-    -- 2. Check recently observed NPC metadata (e.g. pre-pull target/mouseover)
+    -- Fall back to the most recently seen matching creature (such as a boss targeted before pull
+    -- whose combat unit tokens were later masked by instance secrets).
     local bestNpcID, bestMeta, bestTime = nil, nil, 0
     for npcID, meta in pairs(npcMetaCache) do
         if meta.name and strlower(meta.name) == lowerEnc and (meta.lastSeen or 0) > bestTime then
@@ -1057,7 +1100,8 @@ local function OnBossKill(_, encounterName)
         return
     end
 
-    -- Combat just ended; retry briefly in case boss unit tokens became non-secret
+    -- Defer a brief retry because instance unit GUIDs often become non-secret immediately after
+    -- the encounter concludes.
     C_Timer.After(0.5, function()
         ScanActiveUnits()
         TryRecordBossByName(encounterName)
@@ -1065,7 +1109,7 @@ local function OnBossKill(_, encounterName)
 end
 
 -- =========================================================================
--- Event Handlers
+-- Event Registration & Dispatch
 -- =========================================================================
 
 frame:RegisterEvent("ADDON_LOADED")
@@ -1114,6 +1158,8 @@ frame:SetScript("OnEvent", function(_, event, arg1, arg2, arg3)
     if event == "PLAYER_REGEN_ENABLED" then
         inCombat = false
         ScanActiveUnits()
+        -- Snapshot fought enemies before the 0.3s delay so re-entering combat cannot corrupt
+        -- the set while waiting for C_DamageMeter to finalize and un-secret the segment.
         local foughtSnapshot = combatSessionNpcIDs
         combatSessionNpcIDs = {}
         C_Timer.After(0.3, function()

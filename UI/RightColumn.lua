@@ -4,8 +4,9 @@ NS.UI.RightColumn = {}
 
 local rightPanel
 
+-- Acts as a shared container for the LootList (upper half) and SpellList (lower half) so both
+-- scroll views share a single backdrop frame and stay aligned around a fixed divider line.
 function NS.UI.RightColumn.Init(mainFrame)
-
     rightPanel = CreateFrame("Frame", nil, mainFrame, "BackdropTemplate")
     rightPanel:SetPoint("TOPRIGHT", mainFrame, "TOPRIGHT", -4, -22)
     rightPanel:SetPoint("BOTTOMRIGHT", mainFrame, "BOTTOMRIGHT", -4, 45)
@@ -39,7 +40,6 @@ function NS.UI.RightColumn.Init(mainFrame)
     if NS.UI.LootList then
         NS.UI.LootList.Init(rightPanel, lootTitle, divider)
     end
-
     if NS.UI.SpellList then
         NS.UI.SpellList.Init(rightPanel, spellTitle)
     end
@@ -54,6 +54,8 @@ function NS.UI.RightColumn.Reset()
     end
 end
 
+-- Loot is filtered to the selected zone/difficulty context because boss drops vary by difficulty,
+-- whereas abilities are stored globally per npcID and only need the isInstance flag for redaction UX.
 function NS.UI.RightColumn.Update(npcID, filterParent, filterZone, isInstance)
     local data = MobCompendiumDB[npcID]
 

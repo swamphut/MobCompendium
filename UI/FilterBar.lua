@@ -1,7 +1,9 @@
-﻿local _, NS = ...
+local _, NS = ...
 NS.UI = NS.UI or {}
 NS.UI.FilterBar = {}
 
+-- Explicit display order from highest threat to ambient creatures because Lua hash tables
+-- (NS.RANK_CONFIG) iterate in nondeterministic order.
 local RANK_DISPLAY_ORDER = {
     "boss", "rareelite", "elite", "rare", "normal", "minion", "critter", "wildpet", "unknown"
 }
@@ -24,7 +26,7 @@ function NS.UI.FilterBar.Init(mainFrame)
     filterBar:SetBackdropColor(1, 1, 1, 1)
 
     local prevAnchor = nil
-    
+
     if not MobCompendiumDB.settings.rankFilters then
         MobCompendiumDB.settings.rankFilters = {}
     end
@@ -37,6 +39,8 @@ function NS.UI.FilterBar.Init(mainFrame)
             cb.rankKey = rankKey
             checkButtons[rankKey] = cb
 
+            -- Chaining each checkbox off the previous label's right edge adapts automatically to
+            -- varying label widths without hardcoding horizontal pixel offsets.
             if prevAnchor then
                 cb:SetPoint("LEFT", prevAnchor, "RIGHT", 15, 0)
             else
@@ -55,13 +59,14 @@ function NS.UI.FilterBar.Init(mainFrame)
                 cb.icon:SetVertexColor(unpack(config.color))
             end
 
+            -- Re-anchor the template's built-in label past our custom rank icon so they do not overlap.
             cb.text:SetText(config.text)
             cb.text:SetFontObject("GameFontNormal")
             cb.text:ClearAllPoints()
             cb.text:SetPoint("LEFT", cb.icon, "RIGHT", 5, 0)
 
+            -- Default newly added ranks to enabled when loading older SavedVariables.
             local savedState = MobCompendiumDB.settings.rankFilters[rankKey]
-
             if savedState == nil then
                 savedState = true
             end

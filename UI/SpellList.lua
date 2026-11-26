@@ -17,7 +17,9 @@ function NS.UI.SpellList.Init(parent, anchorTop)
     scrollChild:SetSize(260, 1)
     scrollFrame:SetScrollChild(scrollChild)
 
-    -- Lore-styled Redacted notice for instanced content where live combat spells are restricted
+    -- Mixed dungeon pulls and redacted instanced combat frequently yield no attributable spell IDs
+    -- under Midnight's security model; framing that absence as in-world "arcane interference"
+    -- communicates the limitation cleanly without making the panel look broken.
     redactedFrame = CreateFrame("Frame", nil, scrollFrame, "BackdropTemplate")
     redactedFrame:SetPoint("TOPLEFT", scrollFrame, "TOPLEFT", 6, -18)
     redactedFrame:SetPoint("TOPRIGHT", scrollFrame, "TOPRIGHT", -6, -18)
@@ -44,7 +46,6 @@ function NS.UI.SpellList.Init(parent, anchorTop)
     redactedBody:SetTextColor(0.75, 0.72, 0.8)
     redactedBody:SetText(NS.LORE_REDACTED_SPELLS)
 
-    -- Simple empty notice for Open World entries with no observed casts yet
     emptyText = scrollFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     emptyText:SetPoint("CENTER", scrollFrame, "CENTER", 0, 0)
     emptyText:SetWidth(230)
@@ -87,6 +88,8 @@ function NS.UI.SpellList.Update(data, isInstance)
         end
     end
 
+    -- Even on the Instances tab, any previously captured or solo-boss harvested spells still
+    -- display normally; the redacted card only appears when no abilities exist for the creature.
     if #list == 0 then
         scrollChild:SetHeight(1)
         if isInstance then
@@ -128,7 +131,6 @@ function NS.UI.SpellList.Update(data, isInstance)
         btn:Show()
         btn:SetPoint("TOPLEFT", 0, -height)
 
-        -- Load Spell
         local spellInfo = C_Spell.GetSpellInfo(spellID)
         if spellInfo then
             btn.icon:SetTexture(spellInfo.iconID)
@@ -139,7 +141,6 @@ function NS.UI.SpellList.Update(data, isInstance)
         end
         btn.name:SetTextColor(1, 1, 1)
 
-        -- Interactions
         btn:SetScript("OnEnter", function(self)
             GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
             GameTooltip:SetSpellByID(spellID)

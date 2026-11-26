@@ -2,35 +2,36 @@ local _, NS = ...
 NS.UI = NS.UI or {}
 NS.UI.List = {}
 
--- Local References
 local scrollChild, searchBox, emptyStateText
+-- Pooled row buttons are reused across list rebuilds because WoW frames cannot be garbage-collected.
 local buttons = {}
 
--- Expansion State
 local expandedParents = {}
 local expandedSubZones = {}
 
--- State Helpers
-local visibleParentKeys = {}   -- List of all current parent keys (for Alt+Click)
-local parentToSubZoneKeys = {} -- Map of ParentKey -> List of SubZoneKeys (for Shift+Click)
+-- Cached visible key lists enable Shift+Click (expand/collapse all sub-zones in one region)
+-- and Alt+Click (expand/collapse every visible region and sub-zone at once).
+local visibleParentKeys = {}
+local parentToSubZoneKeys = {}
 local initializedTabs = {}
 local selectedNpcID = nil
 local selectedContext = nil
 local searchTimer = nil
 local searchMenu = nil
 
--- Create a unique key for subzones to prevent collisions
+-- Qualifies zone names with their parent so identical sub-zone names (like "General") across
+-- different continents or instances maintain independent expand/collapse state.
 local function GetSubZoneKey(parent, zone)
     return parent .. "::" .. zone
 end
 
+-- Search scopes zone and loot matching to the active tab so querying an open-world zone does
+-- not surface an unrelated instanced entry for a mob that appears in both contexts.
 local function MatchesFilter(mobData, searchText, filters, wantInstances)
-    -- If search is empty, show everything
     if searchText == "" then
         return true
     end
 
-    -- If NO filters are selected, return false
     if not filters.mobs and not filters.zones and not filters.loot and not filters.spells then
         return false
     end
@@ -69,6 +70,8 @@ local function MatchesFilter(mobData, searchText, filters, wantInstances)
         for _, enc in pairs(mobData.encounters) do
             if NS.IsInstanceType(enc.instType) == wantInstances and enc.drops then
                 for itemID, _ in pairs(enc.drops) do
+                    -- Uncached items return nil on first lookup after a cold launch; skipping them
+                    -- avoids stalling the UI thread while typing in the search box.
                     local itemName = NS.GetItemInfo(itemID)
                     if itemName then
                         if string.find(strlower(itemName), searchText, 1, true) then
@@ -183,6 +186,8 @@ function NS.UI.List.Init(mainFrame)
         end
     end)
 
+    -- Debouncing rebuilds by 100ms prevents scanning the entire SavedVariables database on
+    -- every individual keystroke when the compendium grows to thousands of mobs.
     searchBox:SetScript("OnTextChanged", function(self)
         local text = self:GetText()
 
@@ -211,6 +216,7 @@ function NS.UI.List.Init(mainFrame)
     settingsBtn.icon:SetTexture("Interface\\WorldMap\\Gear_64")
     settingsBtn.icon:SetTexCoord(0, 0.5, 0, 0.5)
 
+    -- DIALOG strata ensures the search filter popover floats cleanly above the model frame and scroll rows.
     searchMenu = CreateFrame("Frame", nil, listBgFrame, "BackdropTemplate")
     searchMenu:SetSize(120, 130)
     searchMenu:SetPoint("TOPRIGHT", settingsBtn, "BOTTOMRIGHT", 100, -5)
@@ -258,7 +264,7 @@ function NS.UI.List.Init(mainFrame)
     cbMobs:SetPoint("TOPLEFT", 10, -25)
     local cbZones = CreateSearchOption("Zones", "zones", cbMobs)
     local cbLoot = CreateSearchOption("Loot", "loot", cbZones)
-    local cbSpells = CreateSearchOption("Spells", "spells", cbLoot)
+    CreateSearchOption("Spells", "spells", cbLoot)
 
     settingsBtn:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
@@ -327,6 +333,7 @@ function NS.UI.List.Reset()
 end
 
 function NS.UI.List.Update()
+    -- Skip expensive hierarchy rebuilds while the compendium window is closed; reopening triggers a fresh Update.
     if not scrollChild or not scrollChild:IsVisible() then
         return
     end
@@ -350,17 +357,14 @@ function NS.UI.List.Update()
         rankFilters = NS.UI.FilterBar.GetState()
     end
 
+    -- Numeric keys in MobCompendiumDB are npcIDs; string keys hold metadata (settings, dbVersion, windowPos).
     for id, mobData in pairs(MobCompendiumDB) do
         if type(id) == "number" then
-
             if MatchesFilter(mobData, searchText, filters, wantInstances) then
-
                 if mobData.encounters then
-                    for mapID, encounter in pairs(mobData.encounters) do
-
+                    for _, encounter in pairs(mobData.encounters) do
                         if NS.IsInstanceType(encounter.instType) == wantInstances then
                             local eRank = encounter.rank or "unknown"
-                            -- Safety check if rank key doesn't exist in our known list
                             if not NS.RANK_CONFIG[eRank] then
                                 eRank = "unknown"
                             end
@@ -374,9 +378,10 @@ function NS.UI.List.Update()
                                 local pKey = encounter.parentMap or "Uncategorized"
 
                                 if pKey ~= "Uncategorized" then
-
                                     local zKey = encounter.zoneName or "Unknown Zone"
 
+                                    -- Suffix instanced parent headers with difficulty so Normal/Heroic/Mythic
+                                    -- runs remain visually distinct in the Instances tab.
                                     if encounter.instType and encounter.instType ~= "none" and encounter.diffName and encounter.diffName ~= "" then
                                         pKey = pKey .. " [" .. encounter.diffName .. "]"
                                     end
@@ -389,6 +394,8 @@ function NS.UI.List.Update()
                                         hierarchy[pKey].zones[zKey] = { mobs = {}, seen = {} }
                                     end
 
+                                    -- A mob can exist across multiple sub-maps that share a display name;
+                                    -- deduplicate per displayed zone group so it only appears once.
                                     if not hierarchy[pKey].zones[zKey].seen[id] then
                                         table.insert(hierarchy[pKey].zones[zKey].mobs, {
                                             id = id,
@@ -417,6 +424,8 @@ function NS.UI.List.Update()
 
     visibleParentKeys = sortedParents
 
+    -- On first visit to each tab, expand parent headers and auto-open the player's current zone
+    -- so relevant local mobs are immediately visible without manual clicking.
     if not initializedTabs[activeTab] then
         local currentZoneName = nil
         local mapID = C_Map.GetBestMapForUnit("player")
@@ -441,6 +450,8 @@ function NS.UI.List.Update()
         initializedTabs[activeTab] = true
     end
 
+    -- Flatten the 3-level hierarchy into a single display array so one uniform button pool can
+    -- render region headers, sub-zone headers, mob rows, and visual spacers in order.
     for _, pKey in ipairs(sortedParents) do
         local parentData = hierarchy[pKey]
 
@@ -463,8 +474,8 @@ function NS.UI.List.Update()
             instType = parentData.type
         })
 
+        -- Force-expand matching branches during an active search so results are never hidden inside collapsed folders.
         if isSearching or expandedParents[pKey] then
-
             for _, zKey in ipairs(sortedZones) do
                 local zData = parentData.zones[zKey]
                 local uniqueZKey = GetSubZoneKey(pKey, zKey)
@@ -477,7 +488,6 @@ function NS.UI.List.Update()
                 })
 
                 if isSearching or expandedSubZones[uniqueZKey] then
-
                     table.sort(zData.mobs, function(a, b)
                         return (a.name or "") < (b.name or "")
                     end)
@@ -633,6 +643,7 @@ function NS.UI.List.Update()
         end
     end
 
+    -- Hide leftover pooled rows from longer previous renders.
     for i = #displayList + 1, #buttons do
         buttons[i]:Hide()
     end

@@ -1,12 +1,14 @@
 local _, NS = ...
 
+-- Incrementing this triggers migration logic in Core.lua when the SavedVariables schema changes.
 NS.DB_VERSION = 2
 
--- Compendium Tabs
+-- Tab identifiers used to split open-world field records from instanced archives.
 NS.TAB_OPEN_WORLD = "openworld"
 NS.TAB_INSTANCES = "instances"
 
--- Midnight (12.0+) Secret Value & Compatibility Helpers
+-- Midnight (12.0+) wraps combat-sensitive values in opaque "secret" types that error if compared,
+-- concatenated, or indexed in Lua. Checking issecretvalue dynamically keeps the addon safe on any build.
 function NS.IsSecret(val)
     return issecretvalue ~= nil and issecretvalue(val)
 end
@@ -15,6 +17,8 @@ function NS.IsSafe(val)
     return val ~= nil and not NS.IsSecret(val)
 end
 
+-- Normalizes all non-open-world instance types (including delves, which report as "scenario")
+-- so filtering and lore redaction behave consistently across the UI and tracking engine.
 function NS.IsInstanceType(instType)
     return instType == "party"
         or instType == "raid"
@@ -23,6 +27,8 @@ function NS.IsInstanceType(instType)
         or instType == "arena"
 end
 
+-- Global GetItemInfo* wrappers were deprecated in favor of C_Item in modern Retail.
+-- Keeping fallback wrappers avoids scattering version checks across UI and loot modules.
 function NS.GetItemInfo(item)
     if C_Item and C_Item.GetItemInfo then
         return C_Item.GetItemInfo(item)
@@ -48,12 +54,13 @@ function NS.GetItemQualityColor(quality)
     return 1, 1, 1
 end
 
--- Lore Strings for Redacted Instanced Telemetry
+-- Midnight restricts live combat telemetry and map coordinates inside instanced content;
+-- presenting those gaps as in-universe "redacted" notes keeps the zoologist journal immersive.
 NS.LORE_REDACTED_TITLE = "[ REDACTED ]"
 NS.LORE_REDACTED_SPELLS = "Arcane interference within instanced sanctums shrouds live spellcraft from field observation.\n\nOnly physical spoils and combat records endure."
 NS.LORE_REDACTED_LOCATION = "Restricted — Instanced Sanctum"
 
--- Rank Configuration
+-- Visual mapping for creature classifications shared by the list rows, details header, and filter bar.
 NS.RANK_CONFIG = {
     boss = {
         text = "Boss",
@@ -111,7 +118,8 @@ NS.RANK_CONFIG = {
     }
 }
 
--- Zone Icon Configuration
+-- Raid and dungeon minimap textures carry large transparent padding, so they need a larger size
+-- than standard square spell icons to look visually balanced in the parent headers.
 NS.ZONE_ICONS = {
     raid = {
         icon = "Interface\\Minimap\\Raid_Icon",

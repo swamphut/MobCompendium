@@ -1,11 +1,10 @@
-﻿local _, NS = ...
+local _, NS = ...
 NS.UI = NS.UI or {}
 NS.UI.Details = {}
 
 local parentFrame, nameText, countText, typeText, lastKillText, rankIcon, modelView, rankText
 
 function NS.UI.Details.Init(mainFrame)
-
     parentFrame = CreateFrame("Frame", nil, mainFrame)
     parentFrame:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 304, -22)
     parentFrame:SetPoint("BOTTOMRIGHT", mainFrame, "BOTTOMRIGHT", -305, 45)
@@ -51,6 +50,8 @@ function NS.UI.Details.Init(mainFrame)
     modelFrame:SetBackdrop({ edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border", edgeSize = 6 })
     modelFrame:SetBackdropColor(0.55, 0.55, 0.55, 1)
 
+    -- Oversizing the spellbook parchment texture and clipping children crops out its built-in
+    -- page margins so the model sits on a seamless journal-page backdrop.
     local bg = modelFrame:CreateTexture(nil, "BACKGROUND")
     bg:SetTexture("Interface\\Spellbook\\Spellbook-Page-1")
     bg:SetPoint("TOPLEFT", -70, 0)
@@ -61,17 +62,15 @@ function NS.UI.Details.Init(mainFrame)
     modelView = CreateFrame("PlayerModel", nil, modelFrame)
     modelView:SetPoint("TOPLEFT", 4, -4)
     modelView:SetPoint("BOTTOMRIGHT", -4, 4)
-    modelView.currentZoom = -2
-    modelView:SetPosition(-2, 0, 0)
 
-    -- Initialize state variables on the frame
     modelView.currentZoom = -2
     modelView.panX = 0
     modelView.panY = 0
     modelView:SetPosition(modelView.currentZoom, modelView.panX, modelView.panY)
 
+    -- Left-drag orbits the creature, right-drag pans camera space, and middle-click freezes
+    -- idle animations for closer inspection.
     modelView:SetScript("OnMouseDown", function(self, button)
-        -- Capture raw cursor position for delta calculations
         local cx, cy = GetCursorPosition()
 
         if button == "LeftButton" then
@@ -104,7 +103,8 @@ function NS.UI.Details.Init(mainFrame)
             self:SetFacing(self.startRotation + (cx - self.startX) / 80)
 
         elseif self.isPanning then
-
+            -- Scaling pan sensitivity with zoom depth keeps drag speed feeling consistent
+            -- whether inspecting a giant boss zoomed far out or a tiny critter up close.
             local baseSensitivity = 80
             local zoomScale = math.max(0.1, (10 - self.currentZoom) / 10)
 
@@ -114,6 +114,7 @@ function NS.UI.Details.Init(mainFrame)
             local newX = self.startPanX + deltaX
             local newY = self.startPanY + deltaY
 
+            -- Clamp offsets so the creature cannot be dragged completely out of the viewport.
             local clampLimit = 8.0
             newX = math.max(-clampLimit, math.min(clampLimit, newX))
             newY = math.max(-clampLimit, math.min(clampLimit, newY))
@@ -131,6 +132,8 @@ function NS.UI.Details.Init(mainFrame)
     end)
 end
 
+-- Mirrors the parent/zone key formatting used in List.lua so encounter aggregation matches
+-- whichever tree branch the user clicked.
 local function GetEncounterKeys(encounter)
     local pKey = encounter.parentMap or "Uncategorized"
     local zKey = encounter.zoneName or "Unknown Zone"
@@ -170,7 +173,6 @@ function NS.UI.Details.ShowMob(npcID, filterParent, filterZone, isInstance)
                 if isMatch then
                     filteredKills = filteredKills + (encounter.kills or 0)
 
-                    -- Capture rank/type from the relevant encounter
                     if encounter.rank then
                         displayRank = encounter.rank
                     end
@@ -178,7 +180,7 @@ function NS.UI.Details.ShowMob(npcID, filterParent, filterZone, isInstance)
                         displayType = encounter.type
                     end
 
-                    -- Check for latest time within this context
+                    -- ISO "YYYY-MM-DD HH:MM" timestamps sort chronologically by plain string comparison.
                     if encounter.lastTime and encounter.lastTime >= latestTimeStr then
                         latestTimeStr = encounter.lastTime
                         lastSeenEntry = encounter
@@ -195,7 +197,6 @@ function NS.UI.Details.ShowMob(npcID, filterParent, filterZone, isInstance)
         typeText:Hide()
     end
 
-    -- If we have filtered context, show that count, otherwise total
     if filterParent and filteredKills > 0 then
         countText:SetText("Killed: " .. filteredKills)
     else
@@ -240,6 +241,9 @@ function NS.UI.Details.ShowMob(npcID, filterParent, filterZone, isInstance)
         rankIcon:Hide()
     end
 
+    -- Reset camera transforms before loading a new creature so zoom/pan from a previous model
+    -- does not push the newly selected mob out of frame. pcall protects against retired or
+    -- unsupported creature IDs that could otherwise throw in Midnight's model pipeline.
     modelView.currentZoom = 0
     modelView.panX = 0
     modelView.panY = 0

@@ -1,5 +1,6 @@
-﻿local _, NS = ...
+local _, NS = ...
 
+-- Radius matches the outer rim of Retail's modern circular minimap frame.
 local BUTTON_RADIUS = 104
 
 local button = CreateFrame("Button", "MobCompendiumMinimapButton", Minimap)
@@ -7,7 +8,6 @@ button:SetSize(32, 32)
 button:SetFrameLevel(8)
 button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 
--- Visuals
 local bg = button:CreateTexture(nil, "BACKGROUND")
 bg:SetTexture("Interface\\Minimap\\UI-Minimap-Background")
 bg:SetSize(25, 25)
@@ -26,6 +26,8 @@ border:SetPoint("TOPLEFT")
 
 button:SetHighlightTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
 
+-- Storing position as a polar angle rather than raw X/Y keeps the button anchored cleanly
+-- along the minimap perimeter regardless of UI scaling or minimap resizing.
 local function UpdatePosition()
     local settings = MobCompendiumDB.settings.minimap
     local angle = math.rad(settings.angle)
@@ -36,10 +38,10 @@ local function UpdatePosition()
     button:SetPoint("CENTER", Minimap, "CENTER", x, y)
 end
 
--- Drag Logic
 button:SetMovable(true)
 button:RegisterForDrag("LeftButton")
 
+-- Attaching OnUpdate only while dragging avoids running cursor math every frame at rest.
 button:SetScript("OnDragStart", function(self)
     self:LockHighlight()
     self:SetScript("OnUpdate", function()
@@ -47,6 +49,8 @@ button:SetScript("OnDragStart", function(self)
         local cx, cy = GetCursorPosition()
         local scale = Minimap:GetEffectiveScale()
 
+        -- GetCursorPosition returns physical screen pixels; dividing by effective scale converts
+        -- it into the same UI coordinate space as Minimap:GetCenter().
         cx, cy = cx / scale, cy / scale
 
         local dx = cx - mx
@@ -64,7 +68,7 @@ button:SetScript("OnDragStop", function(self)
     self:SetScript("OnUpdate", nil)
 end)
 
-button:SetScript("OnClick", function(self, buttonPressed)
+button:SetScript("OnClick", function(_, buttonPressed)
     if buttonPressed == "LeftButton" then
         NS.ToggleUI()
     elseif buttonPressed == "RightButton" then
@@ -85,6 +89,8 @@ button:SetScript("OnLeave", function()
     GameTooltip:Hide()
 end)
 
+-- Wait for PLAYER_LOGIN because SavedVariables (and NS.InitSettings in Core.lua's ADDON_LOADED)
+-- are not populated yet when UI files first execute at load time.
 local f = CreateFrame("Frame")
 f:RegisterEvent("PLAYER_LOGIN")
 f:SetScript("OnEvent", function()

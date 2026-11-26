@@ -4,8 +4,11 @@ NS.UI.LootList = {}
 
 local scrollChild, emptyText
 local buttons = {}
+-- Monotonic generation counter prevents stale async ContinueOnItemLoad callbacks from overwriting
+-- pooled buttons if the player clicks through several mobs before item metadata finishes loading.
 local updateToken = 0
 
+-- Matches List.lua's header key format so Normal/Heroic/Mythic drops stay scoped to the selected run.
 local function GetEncounterKeys(encounter)
     local pKey = encounter.parentMap or "Uncategorized"
     local zKey = encounter.zoneName or "Unknown Zone"
@@ -125,6 +128,8 @@ function NS.UI.LootList.Update(data, filterParent, filterZone, isInstance)
         btn.name:SetText("Loading...")
         btn.name:SetTextColor(1, 1, 1)
 
+        -- Items not yet in the local client cache arrive asynchronously from the server;
+        -- ContinueOnItemLoad populates icon, name, and rarity color once available.
         local item = Item:CreateFromItemID(itemID)
         item:ContinueOnItemLoad(function()
             if currentToken ~= updateToken or btn.itemID ~= itemID then

@@ -5,6 +5,8 @@ NS.UI.activeTab = NS.TAB_OPEN_WORLD
 local mainFrame
 local tabButtons = {}
 
+-- Raising the active tab's frame level above the main border creates the illusion that it
+-- connects seamlessly to the bottom edge of the window, while inactive tabs sit recessed behind it.
 local function UpdateTabVisuals()
     if not mainFrame then
         return
@@ -37,6 +39,9 @@ local function UpdateTabVisuals()
     end
 end
 
+-- Custom BackdropTemplate tabs are anchored beneath the main frame rather than using Blizzard's
+-- PanelTabButtonTemplate so tab styling stays immune to retail template XML changes and does not
+-- consume vertical space inside the three-column layout.
 local function CreateCompendiumTab(parent, tabKey, labelText, iconPath, iconSize, anchorTarget, offsetX)
     local btn = CreateFrame("Button", nil, parent, "BackdropTemplate")
     btn:SetSize(165, 32)
@@ -83,6 +88,8 @@ local function CreateCompendiumTab(parent, tabKey, labelText, iconPath, iconSize
     return btn
 end
 
+-- Switching tabs clears the center and right panels so a mob from Open World does not linger
+-- visually while browsing Instanced Archives (or vice versa).
 function NS.SetActiveTab(tabKey)
     NS.UI.activeTab = tabKey
     UpdateTabVisuals()
@@ -101,6 +108,8 @@ function NS.SetActiveTab(tabKey)
     end
 end
 
+-- Refreshing both the list and the active selection ensures live kill increments, loot drops,
+-- and post-combat harvested spells appear immediately if the window is already open.
 function NS.UpdateUI()
     if NS.UI.List and NS.UI.List.Update then
         NS.UI.List.Update()
@@ -122,6 +131,8 @@ function NS.ResetUI()
     end
 end
 
+-- Frame construction is deferred until the player first opens /mobc so the addon keeps zero
+-- UI memory footprint during combat sessions when the compendium is never opened.
 function NS.CreateUI()
     if mainFrame then
         return
@@ -153,6 +164,7 @@ function NS.CreateUI()
         MobCompendiumDB.windowPos = { point = p, relativePoint = rp, x = x, y = y }
     end)
 
+    -- Book open/close foley reinforces the field-journal feel of the compendium.
     mainFrame:SetScript("OnShow", function()
         PlaySound(603)
     end)
@@ -160,6 +172,7 @@ function NS.CreateUI()
         PlaySoundFile(4256145)
     end)
 
+    -- Registering with UISpecialFrames allows the Escape key to dismiss the window natively.
     tinsert(UISpecialFrames, "MobCompendiumMainWindow")
 
     mainFrame.title = mainFrame:CreateFontString(nil, "OVERLAY")
@@ -167,7 +180,6 @@ function NS.CreateUI()
     mainFrame.title:SetPoint("LEFT", mainFrame.TitleBg, "LEFT", 5, 0)
     mainFrame.title:SetText("Mob Compendium — Open World")
 
-    -- Bottom Tabs: Open World vs Instanced Archives
     local openWorldTab = CreateCompendiumTab(
         mainFrame,
         NS.TAB_OPEN_WORLD,
@@ -187,10 +199,10 @@ function NS.CreateUI()
         6
     )
 
+    -- FilterBar initializes before List so rank filter checkbox state is ready for the first render.
     if NS.UI.FilterBar then
         NS.UI.FilterBar.Init(mainFrame)
     end
-
     if NS.UI.List then
         NS.UI.List.Init(mainFrame)
     end
